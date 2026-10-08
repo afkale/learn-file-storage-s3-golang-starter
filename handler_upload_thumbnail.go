@@ -1,10 +1,13 @@
 package main
 
 import (
-	"encoding/base64"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
 	"github.com/google/uuid"
@@ -29,6 +32,11 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		respondWithError(w, http.StatusUnauthorized, "Couldn't validate JWT", err)
 		return
 	}
+	video, err := cfg.db.GetVideo(videoID)
+	if err != nil || video.UserID != userID {
+		respondWithError(w, http.StatusUnauthorized, "Unauthorized", err)
+		return
+	}
 
 	const maxMemory int64 = 10 << 20
 	r.ParseMultipartForm(maxMemory)
@@ -39,22 +47,30 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 	}
 	defer file.Close()
 
-	video, err := cfg.db.GetVideo(videoID)
-	if err != nil || video.UserID != userID {
-		respondWithError(w, http.StatusUnauthorized, "Unauthorized", err)
+	mediaType := header.Header.Get("Content-Type")
+	if !strings.HasPrefix(mediaType, "image/") {
+		respondWithError(w, http.StatusBadRequest, "Thumbnail must be an image", nil)
 		return
 	}
-
-	data, err := io.ReadAll(file)
+	exts, err := mime.ExtensionsByType(mediaType)
+	if err != nil || len(exts) == 0 {
+		respondWithError(w, http.StatusNotAcceptable, "Couldn't determine file extension", err)
+		return
+	}
+	fileName := videoIDString + exts[0]
+	path := filepath.Join(cfg.assetsRoot, fileName)
+	newFile, err := os.Create(path)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Internal server error", err)
 		return
 	}
-	mediaType := header.Header.Get("Content-Type")
-	thumbnailURL := fmt.Sprintf(
-		"data:%s;base64,%s", mediaType, base64.StdEncoding.EncodeToString(data),
-	)
+	defer newFile.Close()
+	if _, err := io.Copy(newFile, file); err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Internal server error", err)
+		return
+	}
 
+	thumbnailURL := fmt.Sprintf("http://localhost:%s/assets/%s", cfg.port, fileName)
 	video.ThumbnailURL = &thumbnailURL
 	err = cfg.db.UpdateVideo(video)
 	if err != nil {
